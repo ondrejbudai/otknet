@@ -1,0 +1,88 @@
+#!/usr/bin/python3
+
+import sys
+import json
+import subprocess
+
+
+def main():
+    data = json.load(sys.stdin)["rpm"]
+
+    results = {}
+    sources = {}
+
+    for name, package_set in data["sets"].items():
+        request = {
+            "command": "depsolve",
+            "arch": data["architecture"],
+            "module_platform_id": data["module_platform_id"],
+            "releasever": data["releasever"],
+            "cachedir": "/tmp",
+            "arguments": {
+                "repos": data["base_repositories"],  # TODO: set-specific repos
+                "transactions": [
+                    {
+                        "package-specs": package_set["packages"]["include"],
+                        "exclude-specs": package_set["packages"].get("exclude", []),
+                        "install_weak_deps": package_set.get("weak", False),
+                    },
+                ],
+            },
+        }
+
+        # print(json.dumps(request), file=sys.stderr)
+
+        process = subprocess.run(
+            ["/usr/libexec/osbuild-depsolve-dnf"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            input=json.dumps(request),
+            encoding="utf8",
+            check=True,
+        )
+
+        result = json.loads(process.stdout)
+
+        if len(result.get("packages", [])) == 0: # TODO: simplify this
+            continue
+        if "org.osbuild.curl" not in sources:
+            sources["org.osbuild.curl"] = {"items": {}}
+
+        results[name] = [
+            {
+                "type": "org.osbuild.rpm",
+                "inputs": {
+                    "packages": {
+                        "type": "org.osbuild.files",
+                        "origin": "org.osbuild.source",
+                        "references": [
+                            {
+                                "id": package["checksum"],
+                                "options": {"metadata": {"rpm.check_gpg": result["repos"][package["repo_id"]]["gpgcheck"]}}, # TODO: Clean this!
+                            }
+                            for package in result.get("packages", [])
+                        ],
+                    }
+                },
+                "options": {
+                    # TODO: clean this!
+                    "gpgkeys": list(set([
+                        gpgkey
+                        for repo in data["base_repositories"]
+                        for gpgkey in repo["gpgkeys"]
+                    ]))
+                }
+            }
+        ]
+
+        for package in result.get("packages", []):
+
+            sources["org.osbuild.curl"]["items"][package["checksum"]] = {
+                "url": package["remote_location"]
+            }
+
+    json.dump({"sources": sources, "stages": results}, sys.stdout)
+
+
+if __name__ == "__main__":
+    main()
